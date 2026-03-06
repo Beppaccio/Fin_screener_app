@@ -11,7 +11,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path 
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -58,44 +58,72 @@ def compute_momentum(df_hist, lookback_roc=60, lookback_perf=20):
     return mom
 
 def download_sp500():
-    url = "https://datahub.io/core/s-and-p-500-companies/r/0.csv"
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    df_raw = pd.read_csv(io.StringIO(resp.text))
-    
-    df = pd.DataFrame({
-        "symbol": df_raw["Symbol"].str.strip(),
-        "name": df_raw["Security"].str.strip(),
-        "sector": df_raw["GICS Sector"].str.strip(),
-    })
-    df["type"] = "Stock"
-    df["universe"] = "S&P 500"
-    df["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    return df
+    try:
+        url = "https://datahub.io/core/s-and-p-500-companies/r/0.csv"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        df_raw = pd.read_csv(io.StringIO(resp.text))
+        
+        df = pd.DataFrame({
+            "symbol": df_raw["Symbol"].str.strip(),
+            "name": df_raw["Security"].str.strip(),
+            "sector": df_raw["GICS Sector"].str.strip(),
+        })
+        df["type"] = "Stock"
+        df["universe"] = "S&P 500"
+        df["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        return df
+    except Exception as e:
+        st.error(f"Errore download S&P 500: {e}")
+        return pd.DataFrame()
 
 def download_nasdaq100():
-    tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-    for tbl in tables:
-        cols = [c.lower() for c in tbl.columns]
-        if "ticker" in cols and "company" in cols:
-            symbol_col = next(c for c in tbl.columns if "ticker" in str(c).lower())
-            name_col = next(c for c in tbl.columns if "company" in str(c).lower())
-            sector_col = next((c for c in tbl.columns if "industry" in str(c).lower()), None)
-            
-            df = pd.DataFrame({
-                "symbol": tbl[symbol_col].astype(str).str.strip(),
-                "name": tbl[name_col].astype(str).str.strip(),
-            })
-            if sector_col:
-                df["sector"] = tbl[sector_col].astype(str).str.strip()
-            else:
-                df["sector"] = "Technology"  # fallback comune Nasdaq 100
-            
-            df["type"] = "Stock"
-            df["universe"] = "Nasdaq 100"
-            df["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            return df
-    raise RuntimeError("Tabella Nasdaq 100 non trovata.")
+    try:
+        # Fonte più stabile per Nasdaq 100
+        url = "https://raw.githubusercontent.com/datasets/finance-vix/main/data/nasdaq100.csv"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+        
+        # Pulizia e standardizzazione
+        df["symbol"] = df["Symbol"].str.strip().str.upper()
+        df["name"] = df["Name"].str.strip()
+        df["sector"] = df.get("Sector", "Technology").str.strip()
+        
+        df = df[["symbol", "name", "sector"]].drop_duplicates(subset="symbol")
+        df["type"] = "Stock"
+        df["universe"] = "Nasdaq 100"
+        df["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        return df
+        
+    except Exception:
+        try:
+            # Fallback Wikipedia con gestione errori migliorata
+            tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100", timeout=30)
+            for tbl in tables:
+                cols = [c.lower() for c in tbl.columns]
+                if "ticker" in cols and "company" in cols:
+                    symbol_col = next(c for c in tbl.columns if "ticker" in str(c).lower())
+                    name_col = next(c for c in tbl.columns if "company" in str(c).lower())
+                    sector_col = next((c for c in tbl.columns if any(x in str(c).lower() for x in ["industry", "sector"])), None)
+                    
+                    df = pd.DataFrame({
+                        "symbol": tbl[symbol_col].astype(str).str.strip().str.upper(),
+                        "name": tbl[name_col].astype(str).str.strip(),
+                    })
+                    if sector_col and sector_col in tbl.columns:
+                        df["sector"] = tbl[sector_col].astype(str).str.strip()
+                    else:
+                        df["sector"] = "Technology"
+                    
+                    df["type"] = "Stock"
+                    df["universe"] = "Nasdaq 100"
+                    df["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    return df
+            return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Errore download Nasdaq 100: {e}")
+            return pd.DataFrame()
 
 def update_universes():
     """Aggiorna tutti gli universi e salva CSV locali"""
@@ -103,11 +131,16 @@ def update_universes():
         sp500 = download_sp500()
         nasdaq100 = download_nasdaq100()
         
-        sp500.to_csv(DATA_DIR / "sp500_constituents.csv", index=False)
-        nasdaq100.to_csv(DATA_DIR / "nasdaq100_constituents.csv", index=False)
+        if not sp500.empty:
+            sp500.to_csv(DATA_DIR / "sp500_constituents.csv", index=False)
+        if not nasdaq100.empty:
+            nasdaq100.to_csv(DATA_DIR / "nasdaq100_constituents.csv", index=False)
         
-        st.success("✅ Universi aggiornati!")
-        return sp500, nasdaq100
+        if sp500.empty and nasdaq100.empty:
+            st.error("❌ Impossibile aggiornare gli universi")
+        else:
+            st.success("✅ Universi aggiornati!")
+        st.rerun()
 
 def load_universe():
     """Carica universi da CSV locali con fallback a download"""
@@ -117,22 +150,28 @@ def load_universe():
     dfs = []
     
     if sp500_file.exists():
-        df_sp = pd.read_csv(sp500_file)
-        dfs.append(df_sp)
-        st.sidebar.caption(f"**S&P 500** ultimo update: {df_sp['updated_at'].iloc[0] if 'updated_at' in df_sp.columns else 'N/A'}")
-    else:
-        st.sidebar.warning("❌ S&P 500 CSV mancante")
+        try:
+            df_sp = pd.read_csv(sp500_file)
+            dfs.append(df_sp)
+            if 'updated_at' in df_sp.columns:
+                st.sidebar.caption(f"**S&P 500** ultimo update: {df_sp['updated_at'].iloc[0]}")
+        except:
+            st.sidebar.warning("❌ Errore lettura S&P 500 CSV")
     
     if nasdaq100_file.exists():
-        df_ndx = pd.read_csv(nasdaq100_file)
-        dfs.append(df_ndx)
-        st.sidebar.caption(f"**Nasdaq 100** ultimo update: {df_ndx['updated_at'].iloc[0] if 'updated_at' in df_ndx.columns else 'N/A'}")
-    else:
-        st.sidebar.warning("❌ Nasdaq 100 CSV mancante")
+        try:
+            df_ndx = pd.read_csv(nasdaq100_file)
+            dfs.append(df_ndx)
+            if 'updated_at' in df_ndx.columns:
+                st.sidebar.caption(f"**Nasdaq 100** ultimo update: {df_ndx['updated_at'].iloc[0]}")
+        except:
+            st.sidebar.warning("❌ Errore lettura Nasdaq 100 CSV")
     
-    if dfs:
-        return pd.concat(dfs, ignore_index=True)
-    return pd.DataFrame(columns=["symbol","name","sector","type","universe"])
+    if not dfs:
+        st.sidebar.warning("📥 Nessun file CSV trovato. Usa 'Aggiorna universi'")
+        return pd.DataFrame(columns=["symbol","name","sector","type","universe"])
+    
+    return pd.concat(dfs, ignore_index=True)
 
 def main():
     st.set_page_config(page_title="Screener Momentum", layout="wide")
@@ -143,11 +182,10 @@ def main():
     
     if st.sidebar.button("🔄 Aggiorna universi", use_container_width=True):
         update_universes()
-        st.rerun()
 
     universe = load_universe()
     if universe.empty:
-        st.error("❌ Nessun universo caricato. Clicca 'Aggiorna universi' nella sidebar.")
+        st.error("❌ Nessun universo disponibile. Clicca 'Aggiorna universi' nella sidebar.")
         st.stop()
 
     st.sidebar.caption(f"**Totale simboli**: {len(universe)}")
@@ -217,19 +255,23 @@ def main():
     if search:
         s = search.lower()
         df_base = df_base[
-            df_base["symbol"].str.lower().str.contains(s) |
-            df_base["name"].str.lower().str.contains(s)
+            df_base["symbol"].str.lower().str.contains(s, na=False) |
+            df_base["name"].str.lower().str.contains(s, na=False)
         ]
 
     symbols = df_base["symbol"].tolist()
     if not symbols:
         st.warning("Nessun simbolo nell'universo filtrato.")
-        return
+        st.stop()
 
     # Calcola momentum con yfinance
     with st.spinner("📊 Calcolo momentum..."):
-        hist = get_history(symbols, period="12mo", interval="1d")
-        mom = compute_momentum(hist, lookback_roc=roc_lb, lookback_perf=perf_lb)
+        try:
+            hist = get_history(symbols, period="12mo", interval="1d")
+            mom = compute_momentum(hist, lookback_roc=roc_lb, lookback_perf=perf_lb)
+        except Exception as e:
+            st.error(f"Errore calcolo momentum: {e}")
+            st.stop()
 
     df = df_base.set_index("symbol").join(mom, how="left")
 
@@ -242,13 +284,14 @@ def main():
         df = df[(df[f"roc_{roc_lb}"] >= 10) & (df[f"perf_{perf_lb}"] <= 0)]
 
     # Filtri quantitativi
-    df = df[
+    mask = (
         (df["close"] >= prezzo_min) &
         (df["close"] <= prezzo_max) &
         (df["volume_avg20"] >= volume_min) &
         (df[f"roc_{roc_lb}"] >= roc_min) &
         (df[f"perf_{perf_lb}"] >= perf_min)
-    ].dropna(subset=[f"roc_{roc_lb}", f"perf_{perf_lb}"])
+    )
+    df = df[mask].dropna(subset=[f"roc_{roc_lb}", f"perf_{perf_lb}"])
 
     # Ordina per ROC decrescente
     df = df.sort_values(by=f"roc_{roc_lb}", ascending=False)
@@ -269,37 +312,46 @@ def main():
                 height=600
             )
             
+            csv_data = df.reset_index()[["symbol", "name", "sector", "universe", "type", 
+                                       "close", "volume_avg20", f"roc_{roc_lb}", f"perf_{perf_lb}"]].round(2)
             st.download_button(
                 label="📥 Download CSV risultati",
-                data=df.reset_index().to_csv(index=False),
+                data=csv_data.to_csv(index=False),
                 file_name=f"screener_results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv"
             )
 
-            selected_symbol = st.selectbox(
-                "Seleziona per dettaglio",
-                options=df.index.tolist(),
-                index=0
-            )
+            if not df.empty:
+                selected_symbol = st.selectbox(
+                    "Seleziona per dettaglio",
+                    options=df.index.tolist(),
+                    index=0
+                )
 
     with right:
         st.subheader("📈 Dettaglio")
-        if 'selected_symbol' in locals() and selected_symbol:
+        if 'selected_symbol' in locals() and selected_symbol and selected_symbol in df.index:
             row = df.loc[selected_symbol]
             st.markdown(f"**{selected_symbol}** – {row['name']} ({row['sector']}, {row['universe']})")
             
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Prezzo", f"{row['close']:.2f}")
-            col2.metric("Vol 20g", f"{row['volume_avg20']:.0f}")
+            col2.metric("Vol 20g", f"{row['volume_avg20']:,.0f}")
             col3.metric("ROC", f"{row[f'roc_{roc_lb}']:.2f}%")
             col4.metric("Perf", f"{row[f'perf_{perf_lb}']:.2f}%")
             
             timeframe = st.radio("Timeframe", options=["3M", "6M", "1Y"], horizontal=True)
             period_map = {"3M": "3mo", "6M": "6mo", "1Y": "1y"}
             
-            hist_one = get_history([selected_symbol], period=period_map[timeframe], interval="1d")
-            close_series = hist_one[selected_symbol]["Close"].dropna()
-            st.line_chart(close_series)
+            try:
+                hist_one = get_history([selected_symbol], period=period_map[timeframe], interval="1d")
+                if selected_symbol in hist_one.columns.get_level_values(0):
+                    close_series = hist_one[selected_symbol]["Close"].dropna()
+                    st.line_chart(close_series)
+                else:
+                    st.warning("Dati storici non disponibili")
+            except:
+                st.warning("Errore caricamento grafico")
 
 if __name__ == "__main__":
     main()
